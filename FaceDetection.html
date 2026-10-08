@@ -9,15 +9,17 @@
     <video id="video" autoplay playsinline muted></video>
     <span id="blinkLog"></span>
     <span id="eyeOpenLog"></span>
+    <span id="blinksPerMinute"></span>
     <script type="module">
         import {FaceLandmarker, FilesetResolver}
         from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs";
 
         const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-        const REOPEN_THRESHOLD = 0.36;
-        const CLOSE_THRESHOLD = 0.20; // Perfect threshold
+        const REOPEN_THRESHOLD = 0.31;
+        const CLOSE_THRESHOLD = 0.18; // Perfect threshold
         const LONG_CLOSURE_SECONDS = 3;
+        const WINDOW_SECONDS_INTERVAL = 10;
 
         let isClosed = false;
         let blinkTimestamp = []
@@ -25,6 +27,9 @@
         let frameCounter = 0;
         let blinkTime = 0;
         let isLongClosureCounted = false;
+        let blinksPerMinute = 0;
+        let closureTime = 0;
+        let slidingWindowBlinkList = [];
 
         let faceFound = false;
 
@@ -49,6 +54,14 @@
 
         let lastVideoTime = -1;
         let results = undefined;
+
+        function takeSnapshot() {
+            const now = Date.now();
+            blinksPerMinute = blinkTimestamp.filter(t => t >= now - 60000).length;
+            slidingWindowBlinkList.push(blinksPerMinute);
+            document.getElementById("blinksPerMinute").textContent =
+                "Blink per minute list: " + slidingWindowBlinkList;
+        }
 
         function getEyeAspectRatios(landmark, eyeChosen) {
             let eye_top = 0;
@@ -100,9 +113,9 @@
 
         function getEyeAspectRationAvg (landmark, type) {
             if (type === "2d") {
-                return (getEyeAspectRatios(landmark, "left")[1] + getEyeAspectRatios(landmark, "right")[0])/2;}
+                return (getEyeAspectRatios(landmark, "left")[1] + getEyeAspectRatios(landmark, "right")[1])/2;}
             if (type === "3d") {
-                return (getEyeAspectRatios(landmark, "left")[0] + getEyeAspectRatios(landmark, "right")[1])/2;}
+                return (getEyeAspectRatios(landmark, "left")[0] + getEyeAspectRatios(landmark, "right")[0])/2;}
             return;
         }
 
@@ -116,28 +129,34 @@
                         console.log("Face Found!")
                         faceFound = true
                     }
-
                     const landmark = results.faceLandmarks[0];
                     let EAR = getEyeAspectRationAvg(landmark, "3d")
 
-                    if(EAR <= OPEN_THRESHOLD)
+                    if(EAR <= CLOSE_THRESHOLD)
                     {
+                        console.log("Closed beyond threshold");
                         if(isClosed === false) {
                             isClosed = true;
-                            blinkTime = Date.now();
-                            blinkTimestamp.push(blinkTime)
+                            closureTime = Date.now();
                         }
-                        if(!isLongClosureCounted && (Date.now() - blinkTime) >= LONG_CLOSURE_SECONDS *1000) {
+                        if(!isLongClosureCounted && (Date.now() - closureTime) >= LONG_CLOSURE_SECONDS *1000) {
                             longClosureCount += 1;
-                            blinkTimestamp.pop();
                             isLongClosureCounted = true;
                         }
                     }
                     if(EAR > REOPEN_THRESHOLD && isClosed === true) {
+                        console.log("Opened beyond threshold");
+                        const openTime = Date.now();
                         isClosed = false;
                         isLongClosureCounted = false;
+                        if((openTime - closureTime) <= 700) {
+                            blinkTime = Date.now();
+                            blinkTimestamp.push(blinkTime)
+                        }
+                        // Sliding window that keep track of how many blinks per minute
                     }
-
+                    blinksPerMinute = blinkTimestamp.filter((timestamp) => timestamp >= (Date.now() - 60000)).length;
+                    
                     document.getElementById("blinkLog").textContent = "Number of blinks: " + blinkTimestamp.length;
                     document.getElementById("eyeOpenLog").textContent = "Number of eye Long Closure " + longClosureCount;
                 }
@@ -159,36 +178,13 @@
         }).then( (stream) => {
             video.srcObject = stream;
             video.addEventListener("loadeddata", renderLoop)
+            document.getElementById("blinksPerMinute").textContent = "Waiting for data...";
+            takeSnapshot();                                          // first value right away
+            setInterval(takeSnapshot, WINDOW_SECONDS_INTERVAL * 1000);
         }).catch( (err) => {
             console.error("Camera Error", err);
         });
 
-        // ---- BLINK COUNTER ----
-// constants: CLOSE_THRESHOLD = 0.30, OPEN_THRESHOLD = 0.36, LONG_CLOSURE_SECONDS = (your choice, see below)
-    
-
-
-
-
-
-    
-
-
-// The objective is to create a function that counts how many times the person has blinked.
-// To do so you first need a counter for the blinking in form of timestamps
-// 
-
-// variables: isClosed = false, closeStart = 0, blinkTimestamp = [] (timestamps), longClosureCount = 0
-// every frame, with the averaged EAR called ear and now = performance.now():
-//   if (!isClosed and ear < CLOSE_THRESHOLD): isClosed = true, closeStart = now
-//   else if (isClosed and ear > OPEN_THRESHOLD):
-//        isClosed = false
-//        duration = now - closeStart (milliseconds)
-//        if duration < 60: ignore it (noise)
-//        else if duration >= LONG_CLOSURE_SECONDS * 1000: longClosureCount++
-//        else: blinkTimestamp.push(now)
-// blinks per minute = number of items in blinkTimestamp with timestamp > now - 60000 (use filter)
-// show EAR, blink rate and longClosureCount on the page, in #log
     </script>
 </body>
 
