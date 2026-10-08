@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>FaceDetectionApplet</title> 
+    
+</head>
+<body>
+    <h1>Face Detection App</h1>
+    <video id="video" autoplay playsinline muted></video>
+    <span id="blinkLog"></span>
+    <span id="eyeOpenLog"></span>
+    <script type="module">
+        import {FaceLandmarker, FilesetResolver}
+        from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs";
+
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+        const REOPEN_THRESHOLD = 0.36;
+        const CLOSE_THRESHOLD = 0.20; // Perfect threshold
+        const LONG_CLOSURE_SECONDS = 3;
+
+        let isClosed = false;
+        let blinkTimestamp = []
+        let longClosureCount = 0;
+        let frameCounter = 0;
+        let blinkTime = 0;
+        let isLongClosureCounted = false;
+
+        let faceFound = false;
+
+        const video = document.getElementById("video");
+
+        const vision = await FilesetResolver.forVisionTasks(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+        );
+
+        const faceLandmarker = await FaceLandmarker.createFromOptions(
+            vision,
+            {
+                baseOptions: {
+                    modelAssetPath: "app/shared/models/face_landmarker.task",
+                    delegate: "GPU",
+                },
+                runningMode: "VIDEO",
+                numFaces: 1,
+            }
+        );
+        console.log("Landmarker ready!");
+
+        let lastVideoTime = -1;
+        let results = undefined;
+
+        function getEyeAspectRatios(landmark, eyeChosen) {
+            let eye_top = 0;
+            let bottom = 0;
+            let inner = 0;
+            let outer = 0;
+            
+            if (eyeChosen === "left") {
+                eye_top = 386;
+                bottom = 374;
+                inner = 362;
+                outer = 263; 
+            }
+            else if (eyeChosen === "right") {
+                eye_top = 159;
+                bottom = 145;
+                inner = 133;
+                outer = 33;
+            }
+            else {
+                console.error("Choose either \"left\" or \"right\" on the eyeChosen argument");
+                return;
+            }
+
+            let vertical3D = PythDistance3D(landmark[eye_top], landmark[bottom]);
+            let horizontal3D = PythDistance3D(landmark[outer], landmark[inner]);
+
+            let vertical2D = PythDistance2D(landmark[eye_top], landmark[bottom]);
+            let horizontal2D = PythDistance2D(landmark[outer], landmark[inner]);
+
+            let horizontalAbs = AbsDistanceHorizontal(landmark[outer], landmark[inner]);
+            let verticalAbs = AbsDistanceVertical(landmark[eye_top], landmark[bottom]);
+            
+            return [vertical3D/horizontal3D, vertical2D/horizontal2D, verticalAbs/horizontalAbs];
+        }
+
+        function PythDistance3D(pA, pB) {
+            return Math.sqrt((pA.x - pB.x)**2 + (pA.y - pB.y)**2 + (pA.z - pB.z)**2)
+        }
+        function PythDistance2D(pA, pB) {
+            return Math.sqrt((pA.x - pB.x)**2 + (pA.y - pB.y)**2)
+        }
+        function AbsDistanceVertical(pA, pB) {
+            return Math.abs(pA.y - pB.y)
+        }
+        function AbsDistanceHorizontal(pA, pB) {
+            return Math.abs(pA.x - pB.x)
+        }
+
+        function getEyeAspectRationAvg (landmark, type) {
+            if (type === "2d") {
+                return (getEyeAspectRatios(landmark, "left")[1] + getEyeAspectRatios(landmark, "right")[0])/2;}
+            if (type === "3d") {
+                return (getEyeAspectRatios(landmark, "left")[0] + getEyeAspectRatios(landmark, "right")[1])/2;}
+            return;
+        }
+
+        function renderLoop() {
+            if(video.currentTime != lastVideoTime) {
+                lastVideoTime = video.currentTime;
+                results = faceLandmarker.detectForVideo(video, performance.now());
+
+                if(results.faceLandmarks.length > 0) {
+                    if(faceFound == false) {
+                        console.log("Face Found!")
+                        faceFound = true
+                    }
+
+                    const landmark = results.faceLandmarks[0];
+                    let EAR = getEyeAspectRationAvg(landmark, "3d")
+
+                    if(EAR <= OPEN_THRESHOLD)
+                    {
+                        if(isClosed === false) {
+                            isClosed = true;
+                            blinkTime = Date.now();
+                            blinkTimestamp.push(blinkTime)
+                        }
+                        if(!isLongClosureCounted && (Date.now() - blinkTime) >= LONG_CLOSURE_SECONDS *1000) {
+                            longClosureCount += 1;
+                            blinkTimestamp.pop();
+                            isLongClosureCounted = true;
+                        }
+                    }
+                    if(EAR > REOPEN_THRESHOLD && isClosed === true) {
+                        isClosed = false;
+                        isLongClosureCounted = false;
+                    }
+
+                    document.getElementById("blinkLog").textContent = "Number of blinks: " + blinkTimestamp.length;
+                    document.getElementById("eyeOpenLog").textContent = "Number of eye Long Closure " + longClosureCount;
+                }
+                else {
+                    if(faceFound == true) {
+                        console.log("Face Lost...")
+                        faceFound = false
+                    }
+                }
+            }
+            requestAnimationFrame(async () => {
+                //await sleep(2000);
+                renderLoop();  
+            });
+        };
+        
+        navigator.mediaDevices.getUserMedia({
+            video:true
+        }).then( (stream) => {
+            video.srcObject = stream;
+            video.addEventListener("loadeddata", renderLoop)
+        }).catch( (err) => {
+            console.error("Camera Error", err);
+        });
+
+        // ---- BLINK COUNTER ----
+// constants: CLOSE_THRESHOLD = 0.30, OPEN_THRESHOLD = 0.36, LONG_CLOSURE_SECONDS = (your choice, see below)
+    
+
+
+
+
+
+    
+
+
+// The objective is to create a function that counts how many times the person has blinked.
+// To do so you first need a counter for the blinking in form of timestamps
+// 
+
+// variables: isClosed = false, closeStart = 0, blinkTimestamp = [] (timestamps), longClosureCount = 0
+// every frame, with the averaged EAR called ear and now = performance.now():
+//   if (!isClosed and ear < CLOSE_THRESHOLD): isClosed = true, closeStart = now
+//   else if (isClosed and ear > OPEN_THRESHOLD):
+//        isClosed = false
+//        duration = now - closeStart (milliseconds)
+//        if duration < 60: ignore it (noise)
+//        else if duration >= LONG_CLOSURE_SECONDS * 1000: longClosureCount++
+//        else: blinkTimestamp.push(now)
+// blinks per minute = number of items in blinkTimestamp with timestamp > now - 60000 (use filter)
+// show EAR, blink rate and longClosureCount on the page, in #log
+    </script>
+</body>
+
+</html>

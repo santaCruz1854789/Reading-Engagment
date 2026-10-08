@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title> EPubReader </title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.2/jszip.min.js"></script>
+    <script src ="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs"
+    crossorigin="anonymous"></script>
+    <style>
+      #info {white-space: pre-line; }
+    </style>
+</head>
+
+<body>
+    <h1> EPub Reader </h1>
+    <button id="prev">Prev</button>
+    <button id="next">Next</button>
+    <button id="endSession">End Session</button>
+    <div id="viewport"></div>
+    <span id="info"></span>
+    <video id="video" autoplay playsinline muted></video>
+    
+    <script>
+
+      // ---- variables that live for the whole session ----
+      // the epub.js object that draws the book
+      // a list where we store every page turn
+      // the moment the current page appeared
+      let lastPageTime;
+      let elapsedPageTime;
+      let pageTurnList = [];
+      let mediaStream = 0;
+      // ---- 1. LOAD THE BOOK ----
+      // when the user picks a file, this function runs
+      // browser tool to read files
+      // runs when reading is done
+      // give the file content to epub.js
+      // show the first page
+      // start with an empty log
+      // session starts now (milliseconds)
+      // start reading the first chosen file
+      const video = document.getElementById("video");
+      const prev = document.getElementById("prev");
+      const next = document.getElementById("next");
+      const book = ePub("epubs/RomeoJuliet.epub");
+      const endSession = document.getElementById("endSession")
+
+      const rend = book.renderTo("viewport", {
+          width: 600,
+          height: 800,
+          manager: "default",
+          flow: "paginated",
+      });
+      rend.display().then((section) => {
+          console.log(section)
+      });
+
+      lastPageTime = Date.now();
+
+      function TurnPageLogger(direction) {
+        document.getElementById("info").textContent = "The " + direction + " Button was pressed!";
+        elapsedPageTime = (Date.now() - lastPageTime)/1000;
+        pageTurnList.push([elapsedPageTime, direction]);
+        lastPageTime = Date.now();
+      };
+
+      prev.addEventListener("click", () => {
+        rend.prev();
+        TurnPageLogger("prev");
+      });
+
+      next.addEventListener("click", () => {
+        rend.next();
+        TurnPageLogger("next");
+      });
+
+      endSession.addEventListener("click", () => {
+        let prevList = pageTurnList.filter(n => n[1] == "prev");
+        let nextList = pageTurnList.filter(n => n[1] == "next");
+        let secondsOnPageAvg = pageTurnList.reduce((sum, n) => sum + n[0], 0)/pageTurnList.length;
+
+        document.getElementById("info").textContent = 
+                                      "\nPrev was pressed: " + prevList.length 
+                                      +"\nNext was pressed: " +nextList.length 
+                                      + "\nAverage second per last page: " + 
+                                      (secondsOnPageAvg ? secondsOnPageAvg: 0);
+        console.table(pageTurnList? pageTurnList:0);
+      });
+
+            
+      navigator.mediaDevices.getUserMedia({ video: true })
+      .then((stream) => {
+          video.srcObject = stream;
+        }).catch((err)=> {
+          console.err("Camera Problem", err);
+        })
+      
+    </script>
+    </body>
+</html>
+
+<!-- ============ BODY ============ -->
+
+<!-- the controls: each element has an id so JavaScript can find it -->
+
+
+<!-- ============ SCRIPT (at the end of the body) ============ -->
+
+
+
+
+
