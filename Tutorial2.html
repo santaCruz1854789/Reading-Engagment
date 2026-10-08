@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title> EPubReader </title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.2/jszip.min.js"></script>
+    <script src ="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
+
+</head>
+<body>
+    <h1> EPub Reader </h1>
+<!-- two libraries loaded from the internet: jszip unzips the .epub,
+     epubjs reads and draws it -->
+<!--
+    To open the epub file we need to set up an element to render to.
+
+    After that we need to create a new ePub and render it to that element.
+    -->
+
+    <div id="viewport"></div>
+    <script>
+        const book = ePub("epubs/AtomicHabits.epub")
+        const rend = book.renderTo("viewport", {
+            width: 600,
+            height: 800,
+            manager: "default",
+            flow: "paginated",
+        })
+        rend.display().then((section) => {
+            console.log(section)
+        })
+    </script>
+    </body>
+</html>
+
+<!--
+Notes: 
+Head and Body are not supposed to be nested
+The order of library loading is important, since epubjs depends on jszip, epubmin needs to be loaded first.
+
+-->

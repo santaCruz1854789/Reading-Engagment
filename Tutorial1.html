@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+
+<html>
+    <head>
+        <meta charset="utf-8"><title>My reader</title>
+    </head>
+    <body>
+        <h1>EPub Reader</h1>
+        <Button id="prev">Prev</Button>
+        <button id="next">Next</button>
+        <span id="info"></span>
+
+        <script>
+        let nextCount = 0;
+        let prevCount = 0;
+        
+        document.getElementById("next").addEventListener("click", () =>{
+            nextCount = nextCount + 1;
+            document.getElementById("info").textContent = "next: " + nextCount + "| prev:" + prevCount;
+        });
+
+        document.getElementById("prev").addEventListener("click", () => {
+            prevCount = prevCount + 1;
+            document.getElementById("info").textContent = "next: " + nextCount + "| prev:" + prevCount;
+        });
+        </script>
+    </body>
+
+</html>
+
+<!--
+ HTML: What's on the window such as button and boxes
+CSS what happens when you interact with something
+
+Element: Something that can be interacted with such as:
+
+<button id="next">Next</button>
+
+Tags are anything related to the characters "<...>""
+For example <button> is called an Opening Tag
+while </button> is called a closing tag
+also id="next" it's called Named Tag, which is going to be used by css to identify this object
+
+HTML is a series of nested and/or repeated tags
+
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8"><title>My reader</title>
+    </head>
+    <body>
+        <h1>My EPub Reader</h1>
+        <Button id="prev">Prev</Button>
+        <button id="next">Next</button>
+        <span id="info"></span>
+    </body>
+</html>
+
+Layer 2 Adding the Scripts
+
+<!DOCTYPE html>
+
+<html>
+    <head>
+        <meta charset="utf-8"><title>My reader</title>
+    </head>
+    <script>
+        document.getElementById("next").addEventListener("click", () =>{
+            alert("You clicked Next");
+        });
+
+        document.getElementById("prev").addEventListener("click", () => {
+            alert("You pressed prev");
+        });
+    </script>
+    <body>
+        <h1>EPub Reader</h1>
+        <Button id="prev">Prev</Button>
+        <button id="next">Next</button>
+        <span id="info"></span>
+    </body>
+</html>
+
+This gives a purpose to the button
+
+
+Layer 3 Adding a bit more complexity
+-->
