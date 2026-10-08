@@ -1,0 +1,16 @@
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+
+# recordings and large files
+*.mp4
+*.mov
+
+# dependencies, if you ever use npm
+node_modules/
+
+Tutorial1.html
+Tutorial2.html
+
+DataForProject/
