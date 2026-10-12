@@ -2,112 +2,388 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title> EPubReader </title>
+    <title>EPubReader</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.2/jszip.min.js"></script>
-    <script src ="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs"
-    crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
     <style>
-      #info {white-space: pre-line; }
+        /* The page fits the window: reader on the left (buttons on top), results on the right. */
+        html, body { height: 100%; margin: 0; font-family: sans-serif; background: #fff; color: #000; color-scheme: light; }
+        #app { display: flex; height: 100vh; }
+        #reader { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+        #controls { padding: 8px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+        #viewport { flex: 1; min-height: 0; }
+        #side { width: 320px; padding: 8px; overflow-y: auto; border-left: 1px solid #ccc; box-sizing: border-box; }
+        #info { white-space: pre-line; display: block; margin: 4px 0; }
+        #liveValues { display: none; font-family: monospace; white-space: pre-line; margin: 8px 0; }
+        #result table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+        #result th, #result td { border: 1px solid #999; padding: 3px 6px; text-align: left; }
+        /* The camera is used but never shown: seeing your own face would distract from reading. */
+        #video { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
     </style>
 </head>
 
 <body>
-    <h1> EPub Reader </h1>
-    <button id="prev">Prev</button>
-    <button id="next">Next</button>
-    <button id="endSession">End Session</button>
-    <div id="viewport"></div>
-    <span id="info"></span>
+    <div id="app">
+        <div id="reader">
+            <div id="controls">
+                <button id="prev">Prev</button>
+                <button id="next">Next</button>
+                <button id="endSession">End Session</button>
+                <button id="toggleValues">Show measured values</button>
+                <button id="clearHistory">Clear saved sessions</button>
+                <span id="cameraStatus"></span>
+            </div>
+            <div id="viewport"></div>
+        </div>
+        <div id="side">
+            <span id="info"></span>
+            <div id="liveValues"></div>
+            <div id="result"></div>
+        </div>
+    </div>
     <video id="video" autoplay playsinline muted></video>
-    
-    <script>
 
-      // ---- variables that live for the whole session ----
-      // the epub.js object that draws the book
-      // a list where we store every page turn
-      // the moment the current page appeared
-      let lastPageTime;
-      let elapsedPageTime;
-      let pageTurnList = [];
-      let mediaStream = 0;
-      // ---- 1. LOAD THE BOOK ----
-      // when the user picks a file, this function runs
-      // browser tool to read files
-      // runs when reading is done
-      // give the file content to epub.js
-      // show the first page
-      // start with an empty log
-      // session starts now (milliseconds)
-      // start reading the first chosen file
-      const video = document.getElementById("video");
-      const prev = document.getElementById("prev");
-      const next = document.getElementById("next");
-      const book = ePub("epubs/RomeoJuliet.epub");
-      const endSession = document.getElementById("endSession")
+    <script type="module">
 
-      const rend = book.renderTo("viewport", {
-          width: 600,
-          height: 800,
-          manager: "default",
-          flow: "paginated",
-      });
-      rend.display().then((section) => {
-          console.log(section)
-      });
+        // SETTINGS (all thresholds in one place; see Table 2 of the report)
+        const BOOK_PATH = "epubs/RomeoJuliet.epub";
+        const MODEL_PATH = "app/shared/models/face_landmarker.task";
+        const VISION_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
 
-      lastPageTime = Date.now();
+        // Blink detector
+        const CLOSE_THRESHOLD = 0.21;       // EAR at or below this: eye is closing
+        const REOPEN_THRESHOLD = 0.26;      // EAR above this: eye is open again (hysteresis)
+        const BLINK_MAX_MS = 700;           // closure up to this long counts as a blink
+        const LONG_CLOSURE_SECONDS = 3;     // closure of at least this long is a long closure
+        const BLINK_WINDOW_MS = 60000;      // sliding window for blinks per minute
+        const SAMPLE_EVERY_SECONDS = 10;    // how often the window is sampled
+        const MIN_WINDOW_SECONDS = 10;      // no sample before this much data exists
+        // Head tracker
+        const STILL_WINDOW_MS = 10000;      // window for head movement
+        // Votes: 1 = engaged
+        const MAX_BLINKS_PER_MIN = 15;      // Gupta et al.
+        const MAX_LONG_CLOSURES = 3;        // Gupta et al.
+        const MAX_HEAD_MOVEMENT = 40;       // own pilot (still ~3-9, moving ~230-290)
+        const MIN_WPM = 120, MAX_WPM = 480; // 0.5x - 2x of the typical ~240 WPM
+        const MAX_BACKTRACK_RATIO = 0.2;    // design assumption
+        // Fusion: equal weights; engaged if score >= 0.5
+        const WEIGHTS = { eyes: 0.25, head: 0.25, reading: 0.25, backtrack: 0.25 };
+        const ENGAGED_SCORE = 0.5;
 
-      function TurnPageLogger(direction) {
-        document.getElementById("info").textContent = "The " + direction + " Button was pressed!";
-        elapsedPageTime = (Date.now() - lastPageTime)/1000;
-        pageTurnList.push([elapsedPageTime, direction]);
-        lastPageTime = Date.now();
-      };
+        // SESSION STATE
+        let session;
+        function newSession() {
+            session = {
+                startMs: Date.now(),
+                pages: [],          // {seconds, words, direction} for every page left
+                samples: [],        // {blinksPerMin, longClosures, head} every 10 s
+                blinkTimes: [],     // timestamps of blinks
+                longClosureTimes: []// timestamps of long closures
+            };
+        }
+        newSession();
 
-      prev.addEventListener("click", () => {
-        rend.prev();
-        TurnPageLogger("prev");
-      });
+        const els = {
+            prev: document.getElementById("prev"),
+            next: document.getElementById("next"),
+            end: document.getElementById("endSession"),
+            toggle: document.getElementById("toggleValues"),
+            clear: document.getElementById("clearHistory"),
+            info: document.getElementById("info"),
+            live: document.getElementById("liveValues"),
+            result: document.getElementById("result"),
+            camera: document.getElementById("cameraStatus"),
+            video: document.getElementById("video"),
+        };
 
-      next.addEventListener("click", () => {
-        rend.next();
-        TurnPageLogger("next");
-      });
+        // TOUCH INTERACTION TRACKER: page time, words per page, direction
+        const book = ePub(BOOK_PATH);
+        const rend = book.renderTo("viewport", { width: "100%", height: "100%", manager: "default", flow: "paginated", spread: "none" });
 
-      endSession.addEventListener("click", () => {
-        let prevList = pageTurnList.filter(n => n[1] == "prev");
-        let nextList = pageTurnList.filter(n => n[1] == "next");
-        let secondsOnPageAvg = pageTurnList.reduce((sum, n) => sum + n[0], 0)/pageTurnList.length;
+        let pageStartMs = null;      // when the current page appeared
+        let pageWords = null;        // words on the current page (null if unknown)
+        let pendingDirection = null; // "next" / "prev" set by the button that caused the turn
+        let reachedEnd = false;      // the last page was shown during this session
 
-        document.getElementById("info").textContent = 
-                                      "\nPrev was pressed: " + prevList.length 
-                                      +"\nNext was pressed: " +nextList.length 
-                                      + "\nAverage second per last page: " + 
-                                      (secondsOnPageAvg ? secondsOnPageAvg: 0);
-        console.table(pageTurnList? pageTurnList:0);
-      });
+        // Count the words between the start and the end of the displayed page.
+        function countWordsOnPage(location) {
+            try {
+                const start = rend.getRange(location.start.cfi);
+                const end = rend.getRange(location.end.cfi);
+                if (!start || !end) return null;
+                const range = start.cloneRange();
+                range.setEnd(end.endContainer, end.endOffset);
+                return range.toString().split(/\s+/).filter(Boolean).length;
+            } catch (err) {
+                console.error("Could not count words on this page", err);
+                return null;
+            }
+        }
 
-            
-      navigator.mediaDevices.getUserMedia({ video: true })
-      .then((stream) => {
-          video.srcObject = stream;
-        }).catch((err)=> {
-          console.err("Camera Problem", err);
-        })
-      
+        rend.on("relocated", (location) => {
+            const now = Date.now();
+            // Close the page that was just left, but only if a button caused the turn.
+            if (pageStartMs !== null && pendingDirection !== null) {
+                session.pages.push({
+                    seconds: (now - pageStartMs) / 1000,
+                    words: pageWords,
+                    direction: pendingDirection,
+                });
+            }
+            pendingDirection = null;
+            pageStartMs = now;
+            pageWords = countWordsOnPage(location);
+            if (location.atEnd) reachedEnd = true;
+            els.info.textContent = "Words on this page: " + pageWords;
+        });
+
+        rend.display();
+
+        els.prev.addEventListener("click", () => { pendingDirection = "prev"; rend.prev(); });
+        els.next.addEventListener("click", () => { pendingDirection = "next"; rend.next(); });
+
+        // =====================================================================
+        // 4. BLINK DETECTOR + HEAD TRACKER (MediaPipe Face Landmarker)
+        // =====================================================================
+        let cameraOn = false;
+        let faceFound = false;
+        let isClosed = false;
+        let closureStart = 0;
+        let isLongClosureCounted = false;
+        let nosePositions = [];
+        let lastEAR = null;
+
+        function dist3D(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2); }
+        function dist2D(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2); }
+
+        // 3D eye aspect ratio of one eye: eyelid distance / corner distance
+        function eyeAspectRatio(lm, top, bottom, inner, outer) {
+            return dist3D(lm[top], lm[bottom]) / dist3D(lm[outer], lm[inner]);
+        }
+        function averageEAR(lm) {
+            const left = eyeAspectRatio(lm, 386, 374, 362, 263);
+            const right = eyeAspectRatio(lm, 159, 145, 133, 33);
+            return (left + right) / 2;
+        }
+
+        // Path length of the nose over the window divided by the time spanned, x1000
+        function getHeadMovement() {
+            if (nosePositions.length < 2) return null;
+            let total = 0;
+            for (let i = 1; i < nosePositions.length; i++) total += dist2D(nosePositions[i - 1], nosePositions[i]);
+            const seconds = (nosePositions[nosePositions.length - 1].t - nosePositions[0].t) / 1000;
+            return seconds > 0 ? (total / seconds) * 1000 : null;
+        }
+
+        function processFrame(landmarks) {
+            const now = Date.now();
+            const ear = averageEAR(landmarks);
+            lastEAR = ear;
+
+            const nose = landmarks[1];
+            nosePositions.push({ t: now, x: nose.x, y: nose.y });
+            nosePositions = nosePositions.filter(p => p.t >= now - STILL_WINDOW_MS);
+
+            if (ear <= CLOSE_THRESHOLD) {
+                if (!isClosed) { isClosed = true; closureStart = now; }
+                if (!isLongClosureCounted && now - closureStart >= LONG_CLOSURE_SECONDS * 1000) {
+                    session.longClosureTimes.push(now);
+                    isLongClosureCounted = true;
+                }
+            }
+            if (ear > REOPEN_THRESHOLD && isClosed) {
+                isClosed = false;
+                isLongClosureCounted = false;
+                if (now - closureStart <= BLINK_MAX_MS) session.blinkTimes.push(now);
+            }
+        }
+
+        // One sample of the video measures; called every SAMPLE_EVERY_SECONDS.
+        function takeSnapshot() {
+            if (!cameraOn || !faceFound) return;   // no face: no sample
+            const now = Date.now();
+            const windowSeconds = Math.min(BLINK_WINDOW_MS / 1000, (now - session.startMs) / 1000);
+            if (windowSeconds < MIN_WINDOW_SECONDS) return;
+            const blinks = session.blinkTimes.filter(t => t >= now - BLINK_WINDOW_MS).length;
+            const longs = session.longClosureTimes.filter(t => t >= now - BLINK_WINDOW_MS).length;
+            const head = getHeadMovement();
+            session.samples.push({
+                blinksPerMin: blinks * 60 / windowSeconds,  // scaled while the window is not yet full
+                longClosures: longs,
+                head: head,
+            });
+        }
+
+        async function startVision() {
+            try {
+                const { FaceLandmarker, FilesetResolver } = await import(VISION_URL + "/vision_bundle.mjs");
+                const vision = await FilesetResolver.forVisionTasks(VISION_URL + "/wasm");
+                const landmarker = await FaceLandmarker.createFromOptions(vision, {
+                    baseOptions: { modelAssetPath: MODEL_PATH, delegate: "GPU" },
+                    runningMode: "VIDEO",
+                    numFaces: 1,
+                });
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                els.video.srcObject = stream;
+                await new Promise(res => els.video.addEventListener("loadeddata", res, { once: true }));
+
+                cameraOn = true;
+                els.camera.textContent = " Camera on";
+                let lastVideoTime = -1;
+                const loop = () => {
+                    if (els.video.currentTime !== lastVideoTime) {
+                        lastVideoTime = els.video.currentTime;
+                        const results = landmarker.detectForVideo(els.video, performance.now());
+                        if (results.faceLandmarks.length > 0) {
+                            faceFound = true;
+                            processFrame(results.faceLandmarks[0]);
+                        } else if (faceFound) {
+                            faceFound = false;
+                            nosePositions = [];   // the head window restarts when the face comes back
+                        }
+                    }
+                    requestAnimationFrame(loop);
+                };
+                loop();
+                setInterval(takeSnapshot, SAMPLE_EVERY_SECONDS * 1000);
+            } catch (err) {
+                // The reader keeps working without the camera; only the reading votes are used then.
+                console.error("Camera or face model problem", err);
+                els.camera.textContent = " Camera off: only reading signals are used";
+            }
+        }
+        startVision();
+
+        // FUSION MODEL: measures -> votes -> weighted vote -> verdict
+        const mean = (xs) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+
+        // Session measures. A measure is null when there is no data for it.
+        function computeMeasures(s) {
+            const withHead = s.samples.filter(x => x.head !== null);
+            const known = s.pages.filter(p => p.words !== null && p.words > 0);
+            const totalWords = known.reduce((a, p) => a + p.words, 0);
+            const totalMinutes = known.reduce((a, p) => a + p.seconds, 0) / 60;
+            const turns = s.pages.filter(p => p.direction === "next" || p.direction === "prev");
+            return {
+                blinksPerMin: mean(s.samples.map(x => x.blinksPerMin)),
+                longClosures: mean(s.samples.map(x => x.longClosures)),
+                head: mean(withHead.map(x => x.head)),
+                wpm: totalMinutes > 0 ? totalWords / totalMinutes : null,
+                backtrackRatio: turns.length ? turns.filter(p => p.direction === "prev").length / turns.length : null,
+            };
+        }
+
+        // Each module votes 1 (engaged) or 0; null if it has no data.
+        function computeVotes(m) {
+            return {
+                eyes: m.blinksPerMin === null ? null
+                    : (m.blinksPerMin <= MAX_BLINKS_PER_MIN && m.longClosures <= MAX_LONG_CLOSURES ? 1 : 0),
+                head: m.head === null ? null : (m.head < MAX_HEAD_MOVEMENT ? 1 : 0),
+                reading: m.wpm === null ? null : (m.wpm >= MIN_WPM && m.wpm <= MAX_WPM ? 1 : 0),
+                backtrack: m.backtrackRatio === null ? null : (m.backtrackRatio <= MAX_BACKTRACK_RATIO ? 1 : 0),
+            };
+        }
+
+        // Weighted vote. If a module has no data its weight is dropped and the others are renormalized.
+        function fuse(votes) {
+            let weightSum = 0, total = 0;
+            for (const key of Object.keys(WEIGHTS)) {
+                if (votes[key] === null) continue;
+                weightSum += WEIGHTS[key];
+                total += WEIGHTS[key] * votes[key];
+            }
+            if (weightSum === 0) return { score: null, engaged: null };
+            const score = total / weightSum;
+            return { score, engaged: score >= ENGAGED_SCORE };
+        }
+
+        // SESSION END: verdict, saving, book-level ratio
+        const bookKey = "engagement:" + BOOK_PATH;
+        function loadHistory() {
+            try { return JSON.parse(localStorage.getItem(bookKey)) || { sessions: [] }; }
+            catch (e) { return { sessions: [] }; }
+        }
+        function saveHistory(h) {
+            try { localStorage.setItem(bookKey, JSON.stringify(h)); } catch (e) { /* storage may be blocked */ }
+        }
+
+        const fmt = (x, d = 1) => x === null ? "-" : x.toFixed(d);
+        const voteText = (v) => v === null ? "-" : (v === 1 ? "engaged" : "not engaged");
+
+        els.end.addEventListener("click", () => {
+            // The page on screen counts for the reading rate, but it has no turn direction.
+            if (pageStartMs !== null) {
+                session.pages.push({ seconds: (Date.now() - pageStartMs) / 1000, words: pageWords, direction: "end" });
+            }
+            try { if (rend.currentLocation().atEnd) reachedEnd = true; } catch (e) { /* location not ready */ }
+            const m = computeMeasures(session);
+            const votes = computeVotes(m);
+            const { score, engaged } = fuse(votes);
+
+            // Book-level metric: engaged sessions / sessions needed to finish the book
+            let bookText;
+            if (engaged !== null) {
+                const history = loadHistory();
+                history.sessions.push({ date: new Date().toISOString(), score, engaged });
+                const nEngaged = history.sessions.filter(s => s.engaged).length;
+                if (reachedEnd) {
+                    bookText = "Book finished. Engaged sessions: " + nEngaged + " of " + history.sessions.length
+                        + " = " + (nEngaged / history.sessions.length).toFixed(2);
+                    saveHistory({ sessions: [] });   // the next reading of the book starts a new count
+                } else {
+                    bookText = "Book not finished yet. Sessions so far: " + history.sessions.length
+                        + ", engaged: " + nEngaged;
+                    saveHistory(history);
+                }
+            } else {
+                bookText = "Not enough data in this session to give a verdict.";
+            }
+
+            els.result.innerHTML =
+                "<table><tr><th>Module</th><th>Measure</th><th>Vote</th></tr>" +
+                "<tr><td>Eyes</td><td>" + fmt(m.blinksPerMin) + " blinks/min, " + fmt(m.longClosures) + " long closures (average per minute window)</td><td>" + voteText(votes.eyes) + "</td></tr>" +
+                "<tr><td>Head</td><td>" + fmt(m.head) + " movement</td><td>" + voteText(votes.head) + "</td></tr>" +
+                "<tr><td>Reading rate</td><td>" + fmt(m.wpm, 0) + " WPM</td><td>" + voteText(votes.reading) + "</td></tr>" +
+                "<tr><td>Backtracks</td><td>" + fmt(m.backtrackRatio, 2) + " of page turns</td><td>" + voteText(votes.backtrack) + "</td></tr></table>" +
+                "<p><b>Session verdict: " + (engaged === null ? "no verdict" : (engaged ? "ENGAGED" : "NOT ENGAGED"))
+                + "</b>" + (score === null ? "" : " (score " + score.toFixed(2) + ")") + "</p><p>" + bookText + "</p>";
+            console.table(session.pages);
+            console.log("Measures", m, "Votes", votes);
+
+            // Start a fresh session; the book position and the camera stay as they are.
+            newSession();
+            reachedEnd = false;
+            pageStartMs = Date.now();
+        });
+
+        els.clear.addEventListener("click", () => {
+            saveHistory({ sessions: [] });
+            els.result.textContent = "Saved sessions cleared.";
+        });
+
+        // Optional panel with the current measured values
+        let showValues = false;
+        els.toggle.addEventListener("click", () => {
+            showValues = !showValues;
+            els.live.style.display = showValues ? "block" : "none";
+            els.toggle.textContent = showValues ? "Hide measured values" : "Show measured values";
+        });
+        setInterval(() => {
+            if (!showValues) return;
+            const now = Date.now();
+            const head = getHeadMovement();
+            els.live.textContent =
+                "Camera: " + (cameraOn ? (faceFound ? "face found" : "no face") : "off") + "\n" +
+                "EAR: " + (lastEAR === null ? "-" : lastEAR.toFixed(2)) + "\n" +
+                "Blinks (last 60 s): " + session.blinkTimes.filter(t => t >= now - BLINK_WINDOW_MS).length + "\n" +
+                "Long closures (last 60 s): " + session.longClosureTimes.filter(t => t >= now - BLINK_WINDOW_MS).length + "\n" +
+                "Head movement: " + (head === null ? "-" : head.toFixed(2)) + "\n" +
+                "Words on this page: " + pageWords + "\n" +
+                "Pages left this session: " + session.pages.length;
+        }, 1000);
+
+        // Handles for testing in the browser console
+        window.engagement = { get session() { return session; }, computeMeasures, computeVotes, fuse, countWordsOnPage, rend };
     </script>
-    </body>
+</body>
 </html>
-
-<!-- ============ BODY ============ -->
-
-<!-- the controls: each element has an id so JavaScript can find it -->
-
-
-<!-- ============ SCRIPT (at the end of the body) ============ -->
-
-
-
-
-
