@@ -1,15 +1,16 @@
 <!DOCTYPE html>
 <html>
-<head>
-    <title>FaceDetectionApplet</title> 
+    <head>
+        <title>FaceDetectionApplet</title> 
     
-</head>
+    </head>
 <body>
     <h1>Face Detection App</h1>
     <video id="video" autoplay playsinline muted></video>
     <span id="blinkLog"></span>
     <span id="eyeOpenLog"></span>
     <span id="blinksPerMinute"></span>
+    <span id="headMovement"></span>
     <script type="module">
         import {FaceLandmarker, FilesetResolver}
         from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs";
@@ -20,7 +21,8 @@
         const CLOSE_THRESHOLD = 0.18; // Perfect threshold
         const LONG_CLOSURE_SECONDS = 3;
         const WINDOW_SECONDS_INTERVAL = 10;
-
+        const STILL_WINDOW_MS = 10000;
+        
         let isClosed = false;
         let blinkTimestamp = []
         let longClosureCount = 0;
@@ -30,15 +32,17 @@
         let blinksPerMinute = 0;
         let closureTime = 0;
         let slidingWindowBlinkList = [];
+        
+        let nosePositions = [];
 
         let faceFound = false;
-
+        
         const video = document.getElementById("video");
 
         const vision = await FilesetResolver.forVisionTasks(
             "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
         );
-
+        
         const faceLandmarker = await FaceLandmarker.createFromOptions(
             vision,
             {
@@ -51,16 +55,31 @@
             }
         );
         console.log("Landmarker ready!");
-
+        
         let lastVideoTime = -1;
         let results = undefined;
-
+        
+        // Head movement speed over the last STILL_WINDOW_MS:
+        // total distance travelled by the nose / seconds spanned, multiplied by 1000 to be readable.
+        function getHeadMovement() {
+            if (nosePositions.length < 2)
+                return 0;
+            let total = 0;
+            for (let i = 1; i < nosePositions.length; i++) {
+                total += PythDistance2D(nosePositions[i-1], nosePositions[i]);
+            }
+            const seconds = (nosePositions[nosePositions.length - 1].t - nosePositions[0].t) / 1000;
+            return seconds > 0 ? (total / seconds) * 1000 : 0;
+        }
+        
         function takeSnapshot() {
             const now = Date.now();
-            blinksPerMinute = blinkTimestamp.filter(t => t >= now - 60000).length;
+            blinksPerMinute = blinkTimestamp.filter(timestamp => timestamp >= now - 60000).length;
             slidingWindowBlinkList.push(blinksPerMinute);
             document.getElementById("blinksPerMinute").textContent =
                 "Blink per minute list: " + slidingWindowBlinkList;
+            document.getElementById("headMovement").textContent =
+                " | Head movement: " + getHeadMovement().toFixed(2);
         }
 
         function getEyeAspectRatios(landmark, eyeChosen) {
@@ -85,10 +104,10 @@
                 console.error("Choose either \"left\" or \"right\" on the eyeChosen argument");
                 return;
             }
-
+            
             let vertical3D = PythDistance3D(landmark[eye_top], landmark[bottom]);
             let horizontal3D = PythDistance3D(landmark[outer], landmark[inner]);
-
+            
             let vertical2D = PythDistance2D(landmark[eye_top], landmark[bottom]);
             let horizontal2D = PythDistance2D(landmark[outer], landmark[inner]);
 
@@ -131,6 +150,10 @@
                     }
                     const landmark = results.faceLandmarks[0];
                     let EAR = getEyeAspectRationAvg(landmark, "3d")
+                    
+                    const nose = landmark[1];
+                    nosePositions.push({t: Date.now(), x: nose.x, y: nose.y});
+                    nosePositions = nosePositions.filter((object) => object.t >= (Date.now() - STILL_WINDOW_MS));
 
                     if(EAR <= CLOSE_THRESHOLD)
                     {
@@ -164,6 +187,7 @@
                     if(faceFound == true) {
                         console.log("Face Lost...")
                         faceFound = false
+                        nosePositions = [];  
                     }
                 }
             }
@@ -178,6 +202,7 @@
         }).then( (stream) => {
             video.srcObject = stream;
             video.addEventListener("loadeddata", renderLoop)
+
             document.getElementById("blinksPerMinute").textContent = "Waiting for data...";
             takeSnapshot();                                          // first value right away
             setInterval(takeSnapshot, WINDOW_SECONDS_INTERVAL * 1000);
